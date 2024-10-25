@@ -1,199 +1,249 @@
-import os
-import threading
-import time
-import math
+#---(1)---初始化模組_開始---
+
+# 導入必要的庫
+from binance.client import Client
+from binance.enums import *
+from binance import ThreadedWebsocketManager
 import pandas as pd
 import numpy as np
-from binance.client import Client
-from binance.exceptions import BinanceAPIException
-from binance import enums
-from datetime import datetime, timedelta
-from queue import Queue
+import time
 import json
+import os
 import logging
-import asyncio
-import aiohttp
-import websockets
-import sys
-import traceback
-from flask import Flask
-
-# 設置日誌
-class CustomFormatter(logging.Formatter):
-    def format(self, record):
-        return record.getMessage()
-
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.INFO)
-handler = logging.StreamHandler(sys.stdout)
-handler.setFormatter(CustomFormatter())
-logger.handlers = [handler]
-
-# 交易對設置
-symbol = ['BTCUSDT', 'BTCUSDT', 'BTCUSDT']
-
-# 全域變數
-CURRENT_STATE = [['IDLE'], ['IDLE'], ['IDLE']]  # 當前交易狀態
-LAST_TRADE_DIRECTION = [
-    [os.environ.get(f'LAST_TRADE_DIRECTION_{i+1}', 'IDLE')] for i in range(3)
-]
-LAST_TRADE_DIRECTION_INPUT = [[""], [""], [""]]  # 手動設置的交易方向
-last_ma_reversal = [[''], [''], ['']]  # MA線反轉方向
-ENTRY_BALANCE = [[0.0], [0.0], [0.0]]  # 入場時的餘額
-time_offset = 0  # 時間偏移量
-local_balance = 0.0  # 本地餘額記錄
-local_position_amt = [[0.0], [0.0], [0.0]]  # 本地持倉量記錄
-local_entry_price = [[0.0], [0.0], [0.0]]  # 本地入場價格記錄
-last_sync_time = 0  # 最後同步時間
-
-# 可調整參數
-LEVERAGE = [35, 35, 35]  # 槓桿倍數
-TAKE_PROFIT_PERCENT = [7, 7, 10]  # 止盈百分比
-STOP_LOSS_PERCENT = [-80, -80, -80]  # 止損百分比
-USE_BALANCE_PERCENT = [99, 99, 99]  # 使用餘額百分比
-TRADING_ENABLED = ['N', 'N', 'N']  # 是否啟用交易
-USE_MARKET_TAKE_PROFIT = ['Y', 'Y', 'Y']  # 是否使用市價止盈
-USE_MARKET_TP_WHEN_REACHED = ['Y', 'Y', 'Y']  # 到達止盈價格時是否使用市價單
-KLINE_INTERVAL = ['15m', '3m', '30m']  # K線時間間隔
-MA_PERIOD = [979, 20, 726]  # MA線週期
-NOTIFY_SIGNAL_CHECK = ['N', 'Y', 'N']  # 是否發送信號通知
-USE_TESTNET = 'N'  # 是否使用測試網
-REPORT_DETAILED_SIGNAL = ['N', 'N', 'N']  # 是否報告詳細信號
-
-# 定義程式名稱
-PROGRAM_NAMES = [
-    f"第{i+1}組程式（{KLINE_INTERVAL[i]} {MA_PERIOD[i]}MA）"
-    for i in range(3)
-]
+import websocket
+from datetime import datetime, timedelta
+import pytz
+from typing import List, Dict, Tuple, Union
+import threading
+import uuid
 
 # 訂單類型常量
-SIDE_BUY = 'BUY'
-SIDE_SELL = 'SELL'
-ORDER_TYPE_MARKET = 'MARKET'
-ORDER_TYPE_LIMIT = 'LIMIT'
-ORDER_TYPE_STOP = 'STOP'
-ORDER_TYPE_TAKE_PROFIT = 'TAKE_PROFIT'
-ORDER_TYPE_STOP_MARKET = 'STOP_MARKET'
-ORDER_TYPE_TAKE_PROFIT_MARKET = 'TAKE_PROFIT_MARKET'
-TIME_IN_FORCE_GTC = 'GTC'
+SIDE_BUY = 'BUY'           # 買入方向
+SIDE_SELL = 'SELL'         # 賣出方向
+ORDER_TYPE_MARKET = 'MARKET'     # 市價單
+ORDER_TYPE_LIMIT = 'LIMIT'       # 限價單
+ORDER_TYPE_STOP = 'STOP'         # 止損單
+ORDER_TYPE_TAKE_PROFIT = 'TAKE_PROFIT'  # 止盈單
+ORDER_TYPE_STOP_MARKET = 'STOP_MARKET'  # 市價止損單
+ORDER_TYPE_TAKE_PROFIT_MARKET = 'TAKE_PROFIT_MARKET'  # 市價止盈單
+TIME_IN_FORCE_GTC = 'GTC'  # 訂單有效期：成交為止
 
-# API調用管理
-api_call_counter = {'second': 0, 'minute': 0}
-api_call_time = {'second': time.time(), 'minute': time.time()}
-API_LIMITS = {'second': 5, 'minute': 900}
-
-def check_api_limits():
-    """檢查API調用限制"""
-    current_time = time.time()
+# 系統配置類別
+class Config:
+    _instance = None
     
-    # 重置秒計數器
-    if current_time - api_call_time['second'] >= 1:
-        api_call_counter['second'] = 0
-        api_call_time['second'] = current_time
+    def __new__(cls):
+        if cls._instance is None:
+            cls._instance = super(Config, cls).__new__(cls)
+            cls._instance._initialized = False
+        return cls._instance
     
-    # 重置分鐘計數器
-    if current_time - api_call_time['minute'] >= 60:
-        api_call_counter['minute'] = 0
-        api_call_time['minute'] = current_time
+    def __init__(self):
+        if not self._initialized:
+            # K線時間週期設定
+            self.KLINE_INTERVAL = ['15m', '3m', '30m']
+            
+            # 移動平均線週期設定
+            self.MA_PERIOD = [979, 20, 726]
+            
+            # 交易對設定
+            self.SYMBOL = ['BTCUSDT', 'BTCUSDT', 'BTCUSDT']
+            
+            # TWD匯率交易對
+            self.TWD_SYMBOL = 'USDTTWD'
+            
+            # 槓桿倍數
+            self.LEVERAGE = [35, 35, 35]
+            
+            # 止盈百分比
+            self.TAKE_PROFIT_PERCENT = [7, 7, 10]
+            
+            # 止損百分比
+            self.STOP_LOSS_PERCENT = [-80, -80, -80]
+            
+            # 使用餘額百分比
+            self.USE_BALANCE_PERCENT = [99, 99, 99]
+            
+            # 交易開關
+            self.TRADING_ENABLED = ['N', 'N', 'N']
+            
+            # 是否使用市價止盈
+            self.USE_MARKET_TAKE_PROFIT = ['Y', 'Y', 'Y']
+            
+            # 是否在到達止盈價格時使用市價單
+            self.USE_MARKET_TP_WHEN_REACHED = ['Y', 'Y', 'Y']
+            
+            # 是否發送交易信號檢查通知
+            self.NOTIFY_SIGNAL_CHECK = ['N', 'Y', 'N']
+            
+            # 是否發送K線價格報告
+            self.NOTIFY_KLINE_REPORT = ['Y', 'Y', 'Y']
+            
+            # 本金變化報告閾值（百分比）
+            self.BALANCE_REPORT_THRESHOLD = 1.0
+            
+            # 程式名稱設定
+            self.PROGRAM_NAMES = [
+                f"第{i+1}組程式（{self.KLINE_INTERVAL[i]} {self.MA_PERIOD[i]}MA）"
+                for i in range(3)
+            ]
+            
+            # API設定
+            self.IS_TEST_NET = os.getenv('IS_TEST_NET', 'N') == 'Y'
+            self.API_KEY = os.getenv('D1_key', '')
+            self.API_SECRET = os.getenv('D1_secret', '')
+            
+            # WebSocket重試設定
+            self.WS_RETRY_LIMIT = 3
+            self.WS_RETRY_DELAY = 1
+            
+            # REST API重試設定
+            self.API_RETRY_LIMIT = 3
+            self.API_RETRY_DELAY = 1
+            
+            # 時區設定
+            self.TIMEZONE = pytz.timezone('Asia/Taipei')
+            
+            self._initialized = True
+
+# 全域配置實例
+Config = Config()
+
+# 全域狀態類別
+class GlobalState:
+    """
+    全域狀態類別
+    管理所有交易程式的狀態、數據和日誌
+    """
+    def __init__(self):
+        # 交易狀態追蹤
+        self.CURRENT_STATE = [['IDLE'], ['IDLE'], ['IDLE']]
+        self.CURRENT_STATE_INPUT = [[""], [""], [""]]
+        
+        # 上次交易方向記錄
+        self.LAST_TRADE_DIRECTION = [
+            [os.environ.get(f'LAST_TRADE_DIRECTION_{i+1}', 'IDLE')] 
+            for i in range(3)
+        ]
+        self.LAST_TRADE_DIRECTION_INPUT = [[""], [""], [""]]
+        
+        # MA線反轉方向記錄
+        self.last_ma_reversal = [[''], [''], ['']]
+        self.last_ma_reversal_input = [[""], [""], [""]]
+        
+        # K線數據儲存
+        self.klines_data = [pd.DataFrame() for _ in range(3)]
+        
+        # WebSocket連接狀態追蹤
+        self.ws_connected = [False, False, False]
+        
+        # 本金監控
+        self.last_balance = 0.0
+        
+        # 初始化日誌系統
+        self._setup_logging()
     
-    # 檢查限制
-    if (api_call_counter['second'] >= API_LIMITS['second'] or 
-        api_call_counter['minute'] >= API_LIMITS['minute']):
-        return False
-    
-    # 更新計數器
-    api_call_counter['second'] += 1
-    api_call_counter['minute'] += 1
-    return True
+    def _setup_logging(self):
+        """設置日誌系統"""
+        class CustomFormatter(logging.Formatter):
+            def format(self, record):
+                if record.levelno == logging.INFO:
+                    return record.getMessage()
+                return super().format(record)
 
-# 使用合約交易
-FUTURES_TRADING = True
+        logging.basicConfig(
+            level=logging.INFO,
+            handlers=[
+                logging.StreamHandler(),
+                logging.FileHandler('trading_bot.log')
+            ]
+        )
+        
+        # 設置自定義格式
+        custom_formatter = CustomFormatter()
+        for handler in logging.getLogger().handlers:
+            handler.setFormatter(custom_formatter)
+            
+        self.logger = logging.getLogger(__name__)
 
-# Flask應用
-app = Flask(__name__)
-message_queue = Queue()
-all_messages = []
-MAX_MESSAGES = 100
-
-# WebSocket 全域變數
-kline_data = [[], [], []]
-
-# 從環境變數中讀取 API 密鑰
-api_key = os.getenv('D3_key')
-api_secret = os.getenv('D3_secret')
-
-if not api_key or not api_secret:
-    logger.error("未找到 API 密鑰。請確保環境變數 'D1_key' 和 'D1_secret' 已正確設置。")
-    raise ValueError("未找到 API 密鑰。")
-
-# 初始化 Binance 客戶端
-client = Client(api_key, api_secret)
-
-# 全局會話
-global_session = None
-
-async def create_global_session():
-    """創建全局aiohttp會話"""
-    global global_session
-    if global_session is None or global_session.closed:
-        global_session = aiohttp.ClientSession()
-
-async def close_global_session():
-    """關閉全局aiohttp會話"""
-    global global_session
-    if global_session and not global_session.closed:
-        await global_session.close()
-
-def get_tw_time(timestamp_ms):
-    """轉換時間戳為台灣時間"""
-    return datetime.fromtimestamp(timestamp_ms/1000) + timedelta(hours=8)
-
-def format_price(price):
-    """格式化價格顯示"""
-    return f"{float(price):.1f}"
-
-def get_interval_minutes(interval):
-    """獲取K線間隔的分鐘數"""
-    interval_map = {
-        '1m': 1, '3m': 3, '5m': 5,
-        '15m': 15, '30m': 30, '1h': 60
-    }
-    return interval_map.get(interval, 0)
-
-async def initialize_trade_directions():
-    """初始化交易方向和MA狀態"""
+def get_twd_rate() -> float:
+    """獲取USDT對TWD的即時匯率"""
     try:
-        for i in range(3):
-            # 檢查LAST_TRADE_DIRECTION_INPUT是否有值
-            if LAST_TRADE_DIRECTION_INPUT[i][0]:
-                LAST_TRADE_DIRECTION[i][0] = LAST_TRADE_DIRECTION_INPUT[i][0]
-            elif os.environ.get(f'LAST_TRADE_DIRECTION_{i+1}'):
-                LAST_TRADE_DIRECTION[i][0] = os.environ.get(f'LAST_TRADE_DIRECTION_{i+1}')
-            else:
-                # 檢查API限制
-                if not check_api_limits():
-                    await asyncio.sleep(1)
-                
-                # 獲取當前倉位資訊
-                position_info = await asyncio.to_thread(
-                    client.futures_position_information,
-                    symbol=symbol[i]
-                )
-                pos_amt = float(position_info[0]['positionAmt'])
-                if pos_amt > 0:
-                    LAST_TRADE_DIRECTION[i][0] = 'LONG'
-                elif pos_amt < 0:
-                    LAST_TRADE_DIRECTION[i][0] = 'SHORT'
-                else:
-                    LAST_TRADE_DIRECTION[i][0] = 'IDLE'
-
-            logger.info(f"第{i+1}組程式初始化完成 - LAST_TRADE_DIRECTION: {LAST_TRADE_DIRECTION[i][0]}, " 
-                       f"last_ma_reversal: {last_ma_reversal[i][0]}")
-
+        ticker = g_client.get_ticker(symbol=Config.TWD_SYMBOL)
+        return float(ticker['lastPrice'])
     except Exception as e:
-        logger.error(f"初始化交易方向時發生錯誤：{str(e)}")
+        logging.error(f"獲取TWD匯率失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+        return 31.0  # 預設匯率
 
-#---(1)---幣安交易程式_初始化模組_結束---
+def get_account_balance() -> Tuple[float, float]:
+    """獲取帳戶餘額（USDT和TWD）"""
+    try:
+        account = g_client.futures_account()
+        balance_usdt = float(account['totalWalletBalance'])
+        twd_rate = get_twd_rate()
+        balance_twd = balance_usdt * twd_rate
+        return balance_usdt, balance_twd
+    except Exception as e:
+        logging.error(f"獲取帳戶餘額失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+        return 0.0, 0.0
+
+def initialize_binance_client() -> Client:
+    """初始化幣安客戶端"""
+    try:
+        if Config.IS_TEST_NET:
+            client = Client(
+                Config.API_KEY, 
+                Config.API_SECRET,
+                testnet=True
+            )
+            logging.info("初始化測試網客戶端成功".encode('utf-8').decode('utf-8'))
+        else:
+            client = Client(
+                Config.API_KEY, 
+                Config.API_SECRET
+            )
+            logging.info("初始化主網客戶端成功".encode('utf-8').decode('utf-8'))
+        return client
+    except Exception as e:
+        logging.error(f"初始化幣安客戶端失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+        raise
+
+def initialize_global_variables():
+    """初始化全域變量"""
+    try:
+        # 初始化全域狀態
+        global g_state
+        g_state = GlobalState()
+        
+        # 初始化幣安客戶端
+        global g_client
+        g_client = initialize_binance_client()
+        
+        # 初始化WebSocket管理器
+        global g_twm
+        g_twm = ThreadedWebsocketManager(
+            api_key=Config.API_KEY,
+            api_secret=Config.API_SECRET,
+            testnet=Config.IS_TEST_NET
+        )
+        
+        # 獲取並儲存初始餘額
+        balance_usdt, _ = get_account_balance()
+        g_state.last_balance = balance_usdt
+        
+        logging.info("全域變量初始化成功".encode('utf-8').decode('utf-8'))
+        return True
+    except Exception as e:
+        logging.error(f"全域變量初始化失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+        return False
+
+def get_taiwan_time() -> str:
+    """獲取台灣時間（HH:MM格式）"""
+    return datetime.now(Config.TIMEZONE).strftime("%H:%M")
+
+#---(1)---初始化模組_結束---
+
+
 
 
 #---(2)---幣安交易程式_數據同步和恢復模組_開始---
@@ -260,73 +310,163 @@ async def synchronize_data():
 #---(2)---幣安交易程式_數據同步和恢復模組_結束---
 
 
-#---(3)---幣安交易程式_K 線資料管理模組_開始---
+#---(3)---MA計算模組_開始---
 
-async def manage_kline_data():
-    """管理 K 線數據的獲取、存儲和處理"""
-    try:
-        logger.info("開始 K 線數據管理...")
+class MACalculator:
+    """MA計算與趨勢判斷類"""
+    def __init__(self, program_index: int):
+        self.program_index = program_index
+        self.ma_period = Config.MA_PERIOD[program_index]
+        self.consecutive_count = 3  # 連續上升或下降的根數要求
+        
+        # 檢查是否有初始MA方向
+        if g_state.last_ma_reversal_input[program_index][0]:
+            self.initialize_ma_direction()
 
-        # 獲取每個交易組別的 K 線數據
-        for group_index in range(3):
-            if not check_api_limits():
-                await asyncio.sleep(1)
+    def initialize_ma_direction(self):
+        """初始化MA方向"""
+        initial_direction = g_state.last_ma_reversal_input[self.program_index][0]
+        if initial_direction in ['UP', 'DOWN']:
+            g_state.last_ma_reversal[self.program_index][0] = initial_direction
 
-            kline_data[group_index] = await asyncio.to_thread(
-                client.get_klines,
-                symbol=symbol[group_index],
-                interval=KLINE_INTERVAL[group_index],
-                limit=1000
-            )
+    def calculate_ma(self, df: pd.DataFrame) -> pd.DataFrame:
+        """計算MA值"""
+        try:
+            if df.empty or len(df) < self.ma_period:
+                logging.warning(f"K線數據不足以計算{self.ma_period}期MA".encode('utf-8').decode('utf-8'))
+                return df
+            
+            # 確保數據已經按時間排序
+            df = df.sort_index()
+            
+            # 計算MA值並四捨五入到小數點後1位
+            df['MA'] = df['close'].rolling(window=self.ma_period, min_periods=self.ma_period).mean().round(1)
+            
+            return df
+            
+        except Exception as e:
+            logging.error(f"計算MA失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return df
 
-            # 檢查 K 線數據是否足夠
-            if not kline_data[group_index] or len(kline_data[group_index]) < 1000:
-                logger.error(f"第{group_index + 1}組程式獲取的 K 線數據不足，長度為 {len(kline_data[group_index])}")
-                continue
+    def check_ma_trend(self, df: pd.DataFrame) -> str:
+        """檢查MA趨勢"""
+        try:
+            if 'MA' not in df.columns or df.empty:
+                return ''
+            
+            # 如果有初始方向且尚未更新過，返回初始方向
+            if (g_state.last_ma_reversal_input[self.program_index][0] and 
+                g_state.last_ma_reversal[self.program_index][0] == g_state.last_ma_reversal_input[self.program_index][0]):
+                return g_state.last_ma_reversal[self.program_index][0]
+            
+            # 確保數據已經按時間排序
+            df = df.sort_index()
+            
+            # 獲取最近的MA值
+            recent_ma = df['MA'].dropna().tail(self.consecutive_count)
+            
+            if len(recent_ma) < self.consecutive_count:
+                return ''
+            
+            # 檢查是否連續上升
+            is_uptrend = all(recent_ma.iloc[i] > recent_ma.iloc[i-1] 
+                           for i in range(1, len(recent_ma)))
+            
+            # 檢查是否連續下降
+            is_downtrend = all(recent_ma.iloc[i] < recent_ma.iloc[i-1] 
+                             for i in range(1, len(recent_ma)))
+            
+            if is_uptrend:
+                return 'UP'
+            elif is_downtrend:
+                return 'DOWN'
+            else:
+                return g_state.last_ma_reversal[self.program_index][0]
+                
+        except Exception as e:
+            logging.error(f"檢查MA趨勢失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return ''
 
-            logger.info(f"第{group_index + 1}組程式 K 線數據獲取成功，數據長度為 {len(kline_data[group_index])}")
+    def update_ma_direction(self, df: pd.DataFrame) -> bool:
+        """更新MA方向"""
+        try:
+            trend = self.check_ma_trend(df)
+            if not trend:
+                return False
+            
+            # 檢查趨勢變化
+            current_direction = g_state.last_ma_reversal[self.program_index][0]
+            
+            # 只在方向改變時更新
+            if trend != current_direction:
+                g_state.last_ma_reversal[self.program_index][0] = trend
+                logging.info(
+                    f"{Config.PROGRAM_NAMES[self.program_index]} MA方向更新為: {trend}".encode('utf-8').decode('utf-8')
+                )
+            
+            return True
+            
+        except Exception as e:
+            logging.error(f"更新MA方向失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return False
 
-            # 保存最新的 1000 條 K 線數據
-            # 這裡我們將數據保存到當前列表中，並確保每次更新後最多保留 1000 條數據
-            kline_data[group_index] = kline_data[group_index][-1000:]
+    def check_price_above_ma(self, df: pd.DataFrame, lookback: int = 2) -> bool:
+        """檢查價格是否在MA線上方"""
+        try:
+            if 'MA' not in df.columns or df.empty:
+                return False
+            
+            # 確保數據已經按時間排序
+            df = df.sort_index()
+            
+            recent_data = df.tail(lookback)
+            if len(recent_data) < lookback:
+                return False
+            
+            # 檢查所有指定的K線是否都在MA上方
+            return all(recent_data['close'] > recent_data['MA'])
+            
+        except Exception as e:
+            logging.error(f"檢查價格位置失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return False
 
-            # 計算最新的移動平均值 (SMA)
-            close_prices = [float(kline[4]) for kline in kline_data[group_index]]
-            ma_value = sum(close_prices[-MA_PERIOD[group_index]:]) / len(close_prices[-MA_PERIOD[group_index]:])
-            logger.info(f"第{group_index + 1}組程式 - 最新的移動平均值 (SMA): {ma_value:.2f}")
+    def check_price_below_ma(self, df: pd.DataFrame, lookback: int = 2) -> bool:
+        """檢查價格是否在MA線下方"""
+        try:
+            if 'MA' not in df.columns or df.empty:
+                return False
+            
+            # 確保數據已經按時間排序
+            df = df.sort_index()
+            
+            recent_data = df.tail(lookback)
+            if len(recent_data) < lookback:
+                return False
+            
+            # 檢查所有指定的K線是否都在MA下方
+            return all(recent_data['close'] < recent_data['MA'])
+            
+        except Exception as e:
+            logging.error(f"檢查價格位置失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return False
 
-            # 更新 MA 線反轉狀態
-            update_ma_reversal_status(group_index, ma_value)
+    def get_current_ma_value(self, df: pd.DataFrame) -> float:
+        """獲取最新的MA值"""
+        try:
+            if 'MA' not in df.columns or df.empty:
+                return 0
+            
+            # 確保數據已經按時間排序
+            df = df.sort_index()
+            
+            latest_ma = df['MA'].dropna().iloc[-1]
+            return round(float(latest_ma), 1)
+            
+        except Exception as e:
+            logging.error(f"獲取MA值失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return 0
 
-    except BinanceAPIException as e:
-        logger.error(f"K 線數據管理時 Binance API 發生錯誤: {str(e)}")
-    except Exception as e:
-        logger.error(f"K 線數據管理時發生未知錯誤: {str(e)}")
-
-
-def update_ma_reversal_status(group_index, ma_value):
-    """更新 MA 線反轉狀態"""
-    try:
-        # 獲取最新的 K 線數據
-        latest_kline = kline_data[group_index][-1]
-
-        # 根據 MA 線與最新收盤價判斷 MA 線反轉狀態
-        close_price = float(latest_kline[4])
-        if close_price > ma_value:
-            new_ma_reversal_status = 'UP'
-        elif close_price < ma_value:
-            new_ma_reversal_status = 'DOWN'
-        else:
-            new_ma_reversal_status = last_ma_reversal[group_index][0]  # 無變化
-
-        if last_ma_reversal[group_index][0] != new_ma_reversal_status:
-            last_ma_reversal[group_index][0] = new_ma_reversal_status
-            logger.info(f"第{group_index + 1}組程式 MA 線反轉狀態更新為: {new_ma_reversal_status}")
-
-    except Exception as e:
-        logger.error(f"更新 MA 線反轉狀態時發生錯誤: {str(e)}")
-
-#---(3)---幣安交易程式_K 線資料管理模組_結束---
+#---(3)---MA計算模組_結束---
 
 
 #---(4)---幣安交易程式_SMA 計算模組_開始---
@@ -421,122 +561,128 @@ async def manage_trade_directions():
 #---(5)---幣安交易程式_交易方向和 MA 狀態管理模組_結束---
 
 
-#---(6)---幣安交易程式_交易判斷邏輯模組_開始---
+#---(6)---報告系統模組_開始---
 
-async def evaluate_trade_signal(group_index):
-    """基於 K 線和 MA 線數據評估交易信號"""
-    try:
-        # 獲取當前 SMA 值
-        sma_value = await calculate_sma(group_index)
-        if sma_value is None:
-            logger.error(f"第{group_index + 1}組程式的 SMA 計算失敗，無法評估交易信號")
-            return
+class ReportingSystem:
+    """報告系統類"""
+    def __init__(self, program_index: int):
+        self.program_index = program_index
+        self.program_name = Config.PROGRAM_NAMES[program_index]
+        self.ma_calculator = MACalculator(program_index)
+    
+    def report_initialization_status(self):
+        """報告初始化狀態"""
+        try:
+            # 獲取倉位信息
+            position = self._get_position_info()
+            position_status = "無持倉"
+            
+            if position and float(position['positionAmt']) != 0:
+                side = "多倉" if float(position['positionAmt']) > 0 else "空倉"
+                position_status = f"持有{side}"
+            
+            # 獲取交易方向
+            last_trade = g_state.LAST_TRADE_DIRECTION[self.program_index][0]
+            trade_direction = {
+                'LONG': '買漲',
+                'SHORT': '買跌',
+                'IDLE': '無'
+            }.get(last_trade, '無')
+            
+            # 獲取MA方向
+            ma_direction = g_state.last_ma_reversal[self.program_index][0]
+            ma_status = {
+                'UP': '上升',
+                'DOWN': '下降',
+                '': '無'
+            }.get(ma_direction, '無')
+            
+            # 生成報告
+            report = (
+                f"{self.program_name} 臺灣時間：{get_taiwan_time()}\n"
+                f"倉位：{position_status}\n"
+                f"上次交易方向：{trade_direction}\n"
+                f"上次MA方向：{ma_status}\n"
+                f"槓桿倍數：{Config.LEVERAGE[self.program_index]}\n"
+                f"止盈設置：{Config.TAKE_PROFIT_PERCENT[self.program_index]}%\n"
+                f"止損設置：{abs(Config.STOP_LOSS_PERCENT[self.program_index])}%"
+            ).encode('utf-8').decode('utf-8')
+            
+            logging.info(report)
+            
+            # 如果是第一個程式才報告本金
+            if self.program_index == 0:
+                self.report_balance()
+            
+        except Exception as e:
+            logging.error(f"生成初始化報告失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+    
+    def report_balance(self):
+        """報告帳戶本金"""
+        try:
+            balance_usdt, balance_twd = get_account_balance()
+            
+            # 檢查餘額變化是否超過閾值
+            if g_state.last_balance > 0:
+                change_percent = abs(balance_usdt - g_state.last_balance) / g_state.last_balance * 100
+                if change_percent < Config.BALANCE_REPORT_THRESHOLD:
+                    return
+            
+            report = (
+                f"帳戶本金：{balance_usdt:.2f} USDT ({balance_twd:.0f} TWD)"
+            ).encode('utf-8').decode('utf-8')
+            
+            logging.info(report)
+            g_state.last_balance = balance_usdt
+            
+        except Exception as e:
+            logging.error(f"生成本金報告失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+    
+    def _get_position_info(self) -> dict:
+        """獲取倉位信息"""
+        try:
+            positions = g_client.futures_position_information(
+                symbol=Config.SYMBOL[self.program_index]
+            )
+            for position in positions:
+                if abs(float(position['positionAmt'])) > 0:
+                    return position
+            return None
+            
+        except Exception as e:
+            logging.error(f"獲取倉位信息失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+            return None
+    
+    def report_trading_disabled(self):
+        """報告交易功能已禁用"""
+        try:
+            report = (
+                f"{self.program_name} "
+                f"臺灣時間：{get_taiwan_time()}，"
+                f"檢測到交易信號，但交易功能已禁用"
+            ).encode('utf-8').decode('utf-8')
+            
+            logging.info(report)
+            
+        except Exception as e:
+            logging.error(f"生成交易禁用報告失敗: {str(e)}".encode('utf-8').decode('utf-8'))
+    
+    def report_system_start(self):
+        """報告系統啟動"""
+        try:
+            report = (
+                f"{self.program_name} "
+                f"臺灣時間：{get_taiwan_time()}，"
+                f"初始化完成"
+            ).encode('utf-8').decode('utf-8')
+            
+            logging.info(report)
+            
+        except Exception as e:
+            logging.error(f"生成系統啟動報告失敗: {str(e)}".encode('utf-8').decode('utf-8'))
 
-        # 獲取最新的 K 線數據
-        latest_kline = kline_data[group_index][-1]
-        close_price = float(latest_kline[4])  # 收盤價
+#---(6)---報告系統模組_結束---
 
-        # 判斷開倉信號
-        if close_price > sma_value and CURRENT_STATE[group_index][0] == 'IDLE':
-            # 當前無持倉且收盤價高於 SMA，判定買入
-            logger.info(f"第{group_index + 1}組程式 - 生成買入信號，收盤價: {close_price:.2f}，SMA: {sma_value:.2f}")
-            await open_position(group_index, SIDE_BUY)
-
-        elif close_price < sma_value and CURRENT_STATE[group_index][0] == 'IDLE':
-            # 當前無持倉且收盤價低於 SMA，判定賣出
-            logger.info(f"第{group_index + 1}組程式 - 生成賣出信號，收盤價: {close_price:.2f}，SMA: {sma_value:.2f}")
-            await open_position(group_index, SIDE_SELL)
-
-        # 判斷平倉信號
-        if CURRENT_STATE[group_index][0] == 'LONG' and close_price < sma_value:
-            # 當前持有多單且收盤價跌破 SMA，平倉
-            logger.info(f"第{group_index + 1}組程式 - 多單平倉信號觸發，收盤價: {close_price:.2f}，SMA: {sma_value:.2f}")
-            await close_position(group_index)
-
-        elif CURRENT_STATE[group_index][0] == 'SHORT' and close_price > sma_value:
-            # 當前持有空單且收盤價高於 SMA，平倉
-            logger.info(f"第{group_index + 1}組程式 - 空單平倉信號觸發，收盤價: {close_price:.2f}，SMA: {sma_value:.2f}")
-            await close_position(group_index)
-
-    except Exception as e:
-        logger.error(f"評估交易信號時發生錯誤: {str(e)}")
-
-
-async def open_position(group_index, side):
-    """執行開倉操作"""
-    try:
-        if not check_api_limits():
-            await asyncio.sleep(1)
-
-        # 獲取可用餘額，用於開倉
-        balance_info = await asyncio.to_thread(client.futures_account_balance)
-        available_balance = float([balance['balance'] for balance in balance_info if balance['asset'] == 'USDT'][0])
-        
-        # 使用餘額百分比進行開倉
-        use_balance = (USE_BALANCE_PERCENT[group_index] / 100) * available_balance
-        market_price = float(client.get_symbol_ticker(symbol=symbol[group_index])['price'])
-        quantity = use_balance / market_price
-
-        # 設置訂單參數
-        order_params = {
-            'symbol': symbol[group_index],
-            'side': side,
-            'type': ORDER_TYPE_MARKET,
-            'quantity': round(quantity, 3)  # 設定開倉量，精度控制
-        }
-
-        # 發送開倉訂單
-        order_result = await asyncio.to_thread(client.futures_create_order, **order_params)
-        
-        # 成功開倉後更新狀態
-        CURRENT_STATE[group_index][0] = 'LONG' if side == SIDE_BUY else 'SHORT'
-        LAST_TRADE_DIRECTION[group_index][0] = 'LONG' if side == SIDE_BUY else 'SHORT'
-        ENTRY_BALANCE[group_index][0] = available_balance
-
-        logger.info(f"第{group_index + 1}組程式 - 成功執行開倉操作，方向: {CURRENT_STATE[group_index][0]}，開倉量: {quantity:.3f}，交易ID: {order_result['orderId']}")
-
-    except BinanceAPIException as e:
-        logger.error(f"第{group_index + 1}組程式 - 開倉時 Binance API 發生錯誤: {str(e)}")
-        CURRENT_STATE[group_index][0] = 'IDLE'  # 開倉失敗，重設狀態
-
-    except Exception as e:
-        logger.error(f"開倉時發生未知錯誤: {str(e)}")
-        CURRENT_STATE[group_index][0] = 'IDLE'  # 開倉失敗，重設狀態
-
-
-async def close_position(group_index):
-    """執行平倉操作"""
-    try:
-        if not check_api_limits():
-            await asyncio.sleep(1)
-
-        # 獲取當前持倉量
-        position_info = await asyncio.to_thread(client.futures_position_information, symbol=symbol[group_index])
-        position_amt = float(position_info[0]['positionAmt'])
-        side = SIDE_SELL if position_amt > 0 else SIDE_BUY
-
-        # 設置訂單參數
-        order_params = {
-            'symbol': symbol[group_index],
-            'side': side,
-            'type': ORDER_TYPE_MARKET,
-            'quantity': abs(position_amt)  # 平倉量應等於目前持倉量
-        }
-
-        # 發送平倉訂單
-        order_result = await asyncio.to_thread(client.futures_create_order, **order_params)
-
-        # 成功平倉後更新狀態
-        CURRENT_STATE[group_index][0] = 'IDLE'
-        logger.info(f"第{group_index + 1}組程式 - 成功執行平倉操作，方向: IDLE，交易ID: {order_result['orderId']}")
-
-    except BinanceAPIException as e:
-        logger.error(f"第{group_index + 1}組程式 - 平倉時 Binance API 發生錯誤: {str(e)}")
-
-    except Exception as e:
-        logger.error(f"平倉時發生未知錯誤: {str(e)}")
-
-#---(6)---幣安交易程式_交易判斷邏輯模組_結束---
 
 
 #---(7)---幣安交易程式_開倉和重試機制模組_開始---
