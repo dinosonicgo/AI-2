@@ -1,0 +1,28 @@
+# 主要依賴
+python-binance
+aiohttp>=3.8.0
+websockets>=10.0
+pandas>=1.5.0
+numpy>=1.20.0
+Flask>=2.0.0
+aiofiles>=23.1.0
+python-dotenv
+
+# 額外的必要依賴
+python-dateutil>=2.8.2
+pytz>=2023.3  # 用於時區處理
+
+
+
+
+
+
+#pandas
+#numpy
+#python-binance
+#flask
+#aiohttp
+#psutil
+#websocket-client
+#requests
+#ntplib
