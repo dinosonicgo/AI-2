@@ -1,28 +1,60 @@
-# 主要依賴
-python-binance
-aiohttp>=3.8.0
-websockets>=10.0
-pandas>=1.5.0
+# === Discord 核心 ===
+# 提供 Discord Bot 功能、應用程式指令等
+discord.py>=2.3.2
+aiohttp>=3.8.0       # discord.py 的常見異步網路依賴
+
+# === AI 與語言模型核心 (LangChain & LangGraph) ===
+# LangChain 框架的核心組件
+langchain>=0.2.0
+# LangChain 的核心抽象與接口
+langchain-core>=0.2.0
+# LangChain 的社群整合與組件
+langchain-community>=0.2.0
+# LangChain 與 Google Generative AI (Gemini) 的整合
+langchain-google-genai>=1.0.0
+# Google Generative AI Python SDK
+google-generativeai>=0.5.0
+# LangGraph 框架 <--- 新增
+langgraph>=0.1.0 # 或者使用您需要的最新版本
+langchain-google-genai
+
+# === RAG 與向量數據庫 ===
+# FAISS 向量數據庫 (CPU 版本)
+faiss-cpu>=1.7.4
+# 用於文本分割時計算 token
+tiktoken>=0.7.0
+# --- JSONLoader 的依賴 ---
+jq>=1.6.0 # 指定一個版本通常更好
+
+# --- 可選但推薦：用於加載不同文件類型 (如果 RAG 需要) ---
+# unstructured>=0.14.0
+# pypdf>=4.0.0
+# python-docx>=1.1.0
+# markdown>=3.6
+
+# === 資料模型與驗證 ===
+# LangChain (v0.1.x 之後) 主要使用的資料驗證庫
+pydantic>=2.0.0 # 注意：如果遇到 v1/v2 兼容問題，可能需要調整
+typing_extensions>=4.0.0 # 添加，Pydantic V2 或類型提示常用
+
+# === 底層依賴與工具程式 ===
+# 用於網路請求
+requests>=2.32.0
+# 用於讀取 .env 文件中的環境變數
+python-dotenv>=1.0.0
+# 異步文件操作
+aiofiles>=23.2.0
+# 提供重試機制
+tenacity>=8.2.0
+# 提供快取工具
+cachetools>=5.3.0
+# 用於處理 YAML 文件
+pyyaml>=6.0
+# 用於修復格式錯誤的 JSON 字串
+json-repair>=0.20.0
+# 關係型數據庫工具包
+SQLAlchemy>=2.0.0
+# Python 科學計算的基礎包
 numpy>=1.20.0
-Flask>=2.0.0
-aiofiles>=23.1.0
-python-dotenv
 
-# 額外的必要依賴
-python-dateutil>=2.8.2
-pytz>=2023.3  # 用於時區處理
-
-
-
-
-
-
-#pandas
-#numpy
-#python-binance
-#flask
-#aiohttp
-#psutil
-#websocket-client
-#requests
-#ntplib
+opencc-python-reimplemented
